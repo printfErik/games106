@@ -44,6 +44,8 @@ public:
 		glm::vec3 normal;
 		glm::vec2 uv;
 		glm::vec3 color;
+		glm::vec4 jointIndices;
+		glm::vec4 jointWeights;
 	};
 
 	// Single vertex buffer for all primitives
@@ -78,7 +80,14 @@ public:
 	// A node represents an object in the glTF scene graph
 	struct Node {
 		Node* parent;
+		uint32_t index;
 		std::vector<Node*> children;
+		glm::vec3 translation{};
+		glm::vec3 scale{1.0f};
+		glm::quat rotation{};
+
+		int32_t skin_index = -1;
+
 		Mesh mesh;
 		glm::mat4 matrix;
 		~Node() {
@@ -108,12 +117,30 @@ public:
 		int32_t imageIndex;
 	};
 
+	struct Skin
+	{
+		std::string name;
+		Node* skeletonRoot = nullptr;
+		std::vector<glm::mat4> inverseMatrices;
+		std::vector<Node*> joints;
+		vks::Buffer ssbo;
+		VkDescriptorSet ds;
+	};
+
+	struct Animation
+	{
+		
+	};
+
 	/*
 		Model data
 	*/
 	std::vector<Image> images;
 	std::vector<Texture> textures;
 	std::vector<Material> materials;
+
+	std::vector<Skin> skins;
+	std::vector<Animation> animations;
 	std::vector<Node*> nodes;
 
 	~VulkanglTFModel()
@@ -201,23 +228,105 @@ public:
 		}
 	}
 
-	void loadNode(const tinygltf::Node& inputNode, const tinygltf::Model& input, VulkanglTFModel::Node* parent, std::vector<uint32_t>& indexBuffer, std::vector<VulkanglTFModel::Vertex>& vertexBuffer)
+	Node* recFindNode(Node* curNode, uint32_t index)
+	{
+		Node* found = nullptr;
+		if (curNode->index == index)
+		{
+			return curNode;
+		}
+
+		for (auto child : curNode->children)
+		{
+			found = recFindNode(child, index);
+			if (found)
+			{
+				break;
+			}
+		}
+
+		return found;
+	}
+
+	Node* findNodeByIndex(uint32_t index)
+	{
+		Node* found = nullptr;
+		for(auto node : nodes)
+		{
+			found = recFindNode(node, index);
+			if (found)
+			{
+				break;
+			}
+		}
+		return found;
+	}
+
+	void loadSkins(tinygltf::Model& input)
+	{
+		skins.resize(input.skins.size());
+		for (int i = 0; i < input.skins.size(); i++)
+		{
+			auto loadedSkin = input.skins[i];
+
+			skins[i].name = loadedSkin.name;
+			skins[i].skeletonRoot = findNodeByIndex(loadedSkin.skeleton);
+
+			for (auto jointIndex: loadedSkin.joints)
+			{
+				skins[i].joints.push_back(findNodeByIndex(jointIndex));
+			}
+
+			if (loadedSkin.inverseBindMatrices > -1)
+			{
+				const auto& accessor = input.accessors[loadedSkin.inverseBindMatrices];
+				const auto& bufferview = input.bufferViews[loadedSkin.inverseBindMatrices];
+				const auto& buffer = input.buffers[loadedSkin.inverseBindMatrices];
+
+				skins[i].inverseMatrices.resize(accessor.count);
+				memcpy(skins[i].inverseMatrices.data(), &buffer.data[accessor.byteOffset + bufferview.byteOffset], accessor.count * sizeof(glm::mat4));
+
+				VK_CHECK_RESULT(vulkanDevice->createBuffer(
+					VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+					VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+					&skins[i].ssbo,
+					sizeof(glm::mat4) * skins[i].inverseMatrices.size(),
+					skins[i].inverseMatrices.data()
+				));
+
+				VK_CHECK_RESULT(skins[i].ssbo.map());
+
+			}
+		}
+	}
+
+	void loadAnimations(tinygltf::Model& input)
+	{
+		
+	}
+
+	void loadNode(const tinygltf::Node& inputNode, const tinygltf::Model& input, VulkanglTFModel::Node* parent, uint32_t nodeIndex, std::vector<uint32_t>& indexBuffer, std::vector<VulkanglTFModel::Vertex>& vertexBuffer)
 	{
 		VulkanglTFModel::Node* node = new VulkanglTFModel::Node{};
 		node->matrix = glm::mat4(1.0f);
 		node->parent = parent;
+		node->index = nodeIndex;
+		node->skin_index = inputNode.skin;
 
 		// Get the local node matrix
 		// It's either made up from translation, rotation, scale or a 4x4 matrix
 		if (inputNode.translation.size() == 3) {
-			node->matrix = glm::translate(node->matrix, glm::vec3(glm::make_vec3(inputNode.translation.data())));
+			node->translation = glm::make_vec3(inputNode.translation.data());
+			//node->matrix = glm::translate(node->matrix, glm::vec3(glm::make_vec3(inputNode.translation.data())));
 		}
 		if (inputNode.rotation.size() == 4) {
 			glm::quat q = glm::make_quat(inputNode.rotation.data());
-			node->matrix *= glm::mat4(q);
+			node->rotation = glm::mat4(q);
+			//node->matrix *= glm::mat4(q);
 		}
 		if (inputNode.scale.size() == 3) {
-			node->matrix = glm::scale(node->matrix, glm::vec3(glm::make_vec3(inputNode.scale.data())));
+			node->scale = glm::make_vec3(inputNode.scale.data());
+			//node->matrix = glm::scale(node->matrix, glm::vec3(glm::make_vec3(inputNode.scale.data())));
 		}
 		if (inputNode.matrix.size() == 16) {
 			node->matrix = glm::make_mat4x4(inputNode.matrix.data());
@@ -226,7 +335,7 @@ public:
 		// Load node's children
 		if (inputNode.children.size() > 0) {
 			for (size_t i = 0; i < inputNode.children.size(); i++) {
-				loadNode(input.nodes[inputNode.children[i]], input , node, indexBuffer, vertexBuffer);
+				loadNode(input.nodes[inputNode.children[i]], input , node, inputNode.children[i], indexBuffer, vertexBuffer);
 			}
 		}
 
@@ -245,6 +354,8 @@ public:
 					const float* positionBuffer = nullptr;
 					const float* normalsBuffer = nullptr;
 					const float* texCoordsBuffer = nullptr;
+					const uint16_t* jointIndicesBuffer = nullptr;
+					const float* jointWeightsBuffer = nullptr;
 					size_t vertexCount = 0;
 
 					// Get buffer data for vertex positions
@@ -268,6 +379,20 @@ public:
 						texCoordsBuffer = reinterpret_cast<const float*>(&(input.buffers[view.buffer].data[accessor.byteOffset + view.byteOffset]));
 					}
 
+					if (glTFPrimitive.attributes.find("JOINTS_0") != glTFPrimitive.attributes.end()) {
+						const tinygltf::Accessor& accessor = input.accessors[glTFPrimitive.attributes.find("JOINTS_0")->second];
+						const tinygltf::BufferView& view = input.bufferViews[accessor.bufferView];
+						jointIndicesBuffer = reinterpret_cast<const uint16_t*>(&(input.buffers[view.buffer].data[accessor.byteOffset + view.byteOffset]));
+					}
+
+					if (glTFPrimitive.attributes.find("WEIGHTS_0") != glTFPrimitive.attributes.end()) {
+						const tinygltf::Accessor& accessor = input.accessors[glTFPrimitive.attributes.find("WEIGHTS_0")->second];
+						const tinygltf::BufferView& view = input.bufferViews[accessor.bufferView];
+						jointWeightsBuffer = reinterpret_cast<const float*>(&(input.buffers[view.buffer].data[accessor.byteOffset + view.byteOffset]));
+					}
+
+					auto hasJoints = jointIndicesBuffer && jointWeightsBuffer;
+
 					// Append data to model's vertex buffer
 					for (size_t v = 0; v < vertexCount; v++) {
 						Vertex vert{};
@@ -275,6 +400,8 @@ public:
 						vert.normal = glm::normalize(glm::vec3(normalsBuffer ? glm::make_vec3(&normalsBuffer[v * 3]) : glm::vec3(0.0f)));
 						vert.uv = texCoordsBuffer ? glm::make_vec2(&texCoordsBuffer[v * 2]) : glm::vec3(0.0f);
 						vert.color = glm::vec3(1.0f);
+						vert.jointIndices = hasJoints ? glm::make_vec4(&jointIndicesBuffer[v * 4]) : glm::vec4(0.0f);
+						vert.jointWeights = hasJoints ? glm::make_vec4(&jointWeightsBuffer[v * 4]) : glm::vec4(0.0f);
 						vertexBuffer.push_back(vert);
 					}
 				}
