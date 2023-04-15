@@ -127,9 +127,28 @@ public:
 		VkDescriptorSet ds;
 	};
 
+	struct AnimationSampler
+	{
+		std::string            interpolation;
+		std::vector<float>     inputs;
+		std::vector<glm::vec4> outputsVec4;
+	};
+
+	struct AnimationChannel
+	{
+		std::string path;
+		Node* node;
+		uint32_t    samplerIndex;
+	};
+
 	struct Animation
 	{
-		
+		std::string                   name;
+		std::vector<AnimationSampler> samplers;
+		std::vector<AnimationChannel> channels;
+		float                         start = std::numeric_limits<float>::max();
+		float                         end = std::numeric_limits<float>::min();
+		float                         currentTime = 0.0f;
 	};
 
 	/*
@@ -280,8 +299,8 @@ public:
 			if (loadedSkin.inverseBindMatrices > -1)
 			{
 				const auto& accessor = input.accessors[loadedSkin.inverseBindMatrices];
-				const auto& bufferview = input.bufferViews[loadedSkin.inverseBindMatrices];
-				const auto& buffer = input.buffers[loadedSkin.inverseBindMatrices];
+				const auto& bufferview = input.bufferViews[accessor.bufferView];
+				const auto& buffer = input.buffers[bufferview.buffer];
 
 				skins[i].inverseMatrices.resize(accessor.count);
 				memcpy(skins[i].inverseMatrices.data(), &buffer.data[accessor.byteOffset + bufferview.byteOffset], accessor.count * sizeof(glm::mat4));
@@ -302,7 +321,85 @@ public:
 
 	void loadAnimations(tinygltf::Model& input)
 	{
-		
+		animations.resize(input.animations.size());
+
+		for (int i = 0; i < animations.size(); i++)
+		{
+			auto loadedAnimation = input.animations[i];
+			animations[i].name = loadedAnimation.name;
+
+			animations[i].samplers.resize(loadedAnimation.samplers.size());
+			for (int j = 0; j < loadedAnimation.samplers.size(); j++)
+			{
+				auto loadedSampler = loadedAnimation.samplers[j];
+				auto dstSampler = animations[i].samplers[j];
+				dstSampler.interpolation = loadedSampler.interpolation;
+
+				// input
+				const auto& inputAccessor = input.accessors[loadedSampler.input];
+				const auto& inputBufferView = input.bufferViews[inputAccessor.bufferView];
+				const auto& inputBuffer = input.buffers[inputBufferView.buffer];
+
+				const void* dataPtr = &inputBuffer.data[inputAccessor.byteOffset + inputBufferView.byteOffset];
+				const auto* buf = static_cast<const float*>(dataPtr);
+
+				for (int k = 0; k < inputAccessor.count; k++)
+				{
+					dstSampler.inputs.push_back(buf[k]);
+				}
+
+				for (auto inputFloat : animations[i].samplers[j].inputs)
+				{
+					if (inputFloat < animations[i].start)
+					{
+						animations[i].start = inputFloat;
+					}
+					if (inputFloat > animations[i].end)
+					{
+						animations[i].end = inputFloat;
+					}
+				}
+
+				// output
+				const auto& outputAccessor = input.accessors[loadedSampler.output];
+				const auto& outputBufferView = input.bufferViews[outputAccessor.bufferView];
+				const auto& outputBuffer = input.buffers[outputBufferView.buffer];
+
+				const void* pOutData = &outputBuffer.data[outputAccessor.byteOffset + outputBufferView.byteOffset];
+
+				switch (outputAccessor.type)
+				{
+				case TINYGLTF_TYPE_VEC3:
+				{
+					const glm::vec3* buf = static_cast<const glm::vec3*>(pOutData);
+					for (int index = 0; index < outputAccessor.count; index++)
+					{
+						dstSampler.outputsVec4.push_back(glm::vec4(buf[index], 0.0f));
+					}
+					break;
+				}
+				case TINYGLTF_TYPE_VEC4:
+				{
+					const glm::vec4* buf = static_cast<const glm::vec4*>(pOutData);
+					for (size_t index = 0; index < outputAccessor.count; index++)
+					{
+						dstSampler.outputsVec4.push_back(buf[index]);
+					}
+					break;
+				}
+					default:
+						break;
+				}
+			}
+
+			animations[i].channels.resize(loadedAnimation.channels.size());
+			for (int j = 0; j < loadedAnimation.channels.size(); j++)
+			{
+				auto loadedChannel = loadedAnimation.channels[j];
+				auto& desChannel = animations[i].channels[j];
+
+			}
+		}
 	}
 
 	void loadNode(const tinygltf::Node& inputNode, const tinygltf::Model& input, VulkanglTFModel::Node* parent, uint32_t nodeIndex, std::vector<uint32_t>& indexBuffer, std::vector<VulkanglTFModel::Vertex>& vertexBuffer)
