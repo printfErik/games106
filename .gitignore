@@ -234,3 +234,6 @@ data/textures/**
 data/README_asset_pack.md
 data/font*.*
 data/roboto*.*
+ZERO_CHECK.proj
+*.filters
+data/Robot-Medium-license.txt
